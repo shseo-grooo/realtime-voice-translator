@@ -29,6 +29,7 @@ export default function Home() {
     translatedText,
     streamingText,
     isTranslating,
+    pendingCount,
     error: translateError,
     translate,
     clearTranslation,
@@ -87,6 +88,7 @@ export default function Home() {
         translatedText={translatedText}
         streamingText={streamingText}
         isTranslating={isTranslating}
+        pendingCount={pendingCount}
       />
 
       <MicButton
