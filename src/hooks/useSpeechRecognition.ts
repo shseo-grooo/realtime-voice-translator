@@ -13,13 +13,14 @@ export function useSpeechRecognition(lang: string) {
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const isListeningRef = useRef(false);
+  const isActiveRef = useRef(false);    // true between onstart ~ onend
+  const isRestartingRef = useRef(false); // prevents concurrent restart attempts
   const onFinalRef = useRef<((text: string) => void) | null>(null);
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
-  // Tracks the current lang inside onend closures without stale closure issues
   const langRef = useRef(lang);
   useEffect(() => { langRef.current = lang; }, [lang]);
 
@@ -30,8 +31,6 @@ export function useSpeechRecognition(lang: string) {
     setState((prev) => ({ ...prev, isSupported: supported }));
   }, []);
 
-  // createInstance always makes a fresh SpeechRecognition object.
-  // Referenced via ref so onend closures can call the latest version.
   const createInstanceRef = useRef<() => void>(() => {});
 
   createInstanceRef.current = () => {
@@ -47,8 +46,12 @@ export function useSpeechRecognition(lang: string) {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = langRef.current;
-
     recognitionRef.current = recognition;
+
+    recognition.onstart = () => {
+      isActiveRef.current = true;
+      isRestartingRef.current = false;
+    };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onresult = (event: any) => {
@@ -75,80 +78,96 @@ export function useSpeechRecognition(lang: string) {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     recognition.onerror = (event: any) => {
-      // aborted = we called stop/abort intentionally; no-speech = silence, not an error
       if (event.error === "no-speech" || event.error === "aborted") return;
+      if (event.error === "network") {
+        // Network blip — retry after 1s
+        scheduleRestart(1000);
+        return;
+      }
       setState((prev) => ({ ...prev, error: event.error }));
     };
 
     recognition.onend = () => {
-      // Only restart if the user hasn't clicked stop
+      isActiveRef.current = false;
       if (!isListeningRef.current) {
         setState((prev) => ({ ...prev, isListening: false, interimTranscript: "" }));
         return;
       }
-      // Delay before restarting — browser needs a tick to fully reset
-      restartTimerRef.current = setTimeout(() => {
-        if (isListeningRef.current) {
-          createInstanceRef.current();
-        }
-      }, 150);
+      scheduleRestart(50);
     };
 
     try {
       recognition.start();
     } catch {
-      // InvalidStateError etc. — retry once after a short delay
-      restartTimerRef.current = setTimeout(() => {
-        if (isListeningRef.current) {
-          createInstanceRef.current();
-        }
-      }, 300);
+      scheduleRestart(300);
     }
   };
+
+  function scheduleRestart(delay: number) {
+    if (!isListeningRef.current || isRestartingRef.current) return;
+    isRestartingRef.current = true;
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    restartTimerRef.current = setTimeout(() => {
+      if (isListeningRef.current) createInstanceRef.current();
+    }, delay);
+  }
+
+  // Watchdog: every 2s, if we should be listening but recognition isn't active
+  // and no restart is scheduled, force a new instance.
+  const startWatchdog = useCallback(() => {
+    if (watchdogRef.current) clearInterval(watchdogRef.current);
+    watchdogRef.current = setInterval(() => {
+      if (!isListeningRef.current) {
+        clearInterval(watchdogRef.current!);
+        watchdogRef.current = null;
+        return;
+      }
+      if (!isActiveRef.current && !isRestartingRef.current) {
+        createInstanceRef.current();
+      }
+    }, 2000);
+  }, []);
 
   const startListening = useCallback(async (onFinal: (text: string) => void) => {
     onFinalRef.current = onFinal;
 
-    // Abort existing instance cleanly first so old onend won't restart.
+    // Stop previous instance without triggering auto-restart
     isListeningRef.current = false;
+    isRestartingRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     if (recognitionRef.current) {
       try { recognitionRef.current.abort(); } catch { /* ignore */ }
       recognitionRef.current = null;
     }
 
-    // Request mic with noise suppression + echo cancellation.
-    // This configures the browser audio pipeline before SpeechRecognition starts,
-    // so both share the same processed audio track.
     try {
       if (audioStreamRef.current) {
         audioStreamRef.current.getTracks().forEach((t) => t.stop());
       }
       audioStreamRef.current = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
     } catch {
-      // Permission denied or unsupported — continue anyway without the stream
       audioStreamRef.current = null;
     }
 
     isListeningRef.current = true;
     setState((prev) => ({ ...prev, isListening: true, error: null, interimTranscript: "" }));
 
-    // Small delay to ensure the aborted instance has fully settled
     restartTimerRef.current = setTimeout(() => {
-      if (isListeningRef.current) createInstanceRef.current();
+      if (isListeningRef.current) {
+        createInstanceRef.current();
+        startWatchdog();
+      }
     }, 50);
-  }, []);
+  }, [startWatchdog]);
 
   const stopListening = useCallback(() => {
     isListeningRef.current = false;
+    isRestartingRef.current = false;
     onFinalRef.current = null;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    if (watchdogRef.current) { clearInterval(watchdogRef.current); watchdogRef.current = null; }
     if (recognitionRef.current) {
       try { recognitionRef.current.abort(); } catch { /* ignore */ }
       recognitionRef.current = null;
@@ -168,6 +187,7 @@ export function useSpeechRecognition(lang: string) {
     return () => {
       isListeningRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+      if (watchdogRef.current) clearInterval(watchdogRef.current);
       try { recognitionRef.current?.abort(); } catch { /* ignore */ }
       audioStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
