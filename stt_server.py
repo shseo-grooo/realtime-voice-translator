@@ -51,16 +51,19 @@ app.add_middleware(
 def _transcribe(audio_path: str, lang: str) -> str:
     """Synchronous transcription — run in thread executor."""
     language = None if lang == "auto" else lang
-    segments, _ = model.transcribe(
+
+    # VAD disabled: let whisper handle all audio without pre-filtering.
+    # Short clips (5s) with VAD enabled would often be filtered out entirely.
+    segments, info = model.transcribe(
         audio_path,
         language=language,
-        vad_filter=True,
-        vad_parameters={
-            "min_silence_duration_ms": 200,
-            "speech_pad_ms": 100,
-        },
+        beam_size=5,
+        vad_filter=False,
+        condition_on_previous_text=False,
     )
-    return "".join(s.text for s in segments).strip()
+    text = "".join(s.text for s in segments).strip()
+    print(f"  detected language: {info.language} ({info.language_probability:.0%}), text: {text!r}")
+    return text
 
 
 @app.websocket("/ws")
@@ -73,12 +76,13 @@ async def transcribe_ws(websocket: WebSocket, lang: str = "ko"):
     try:
         while True:
             audio_bytes: bytes = await websocket.receive_bytes()
+            print(f"[received] {len(audio_bytes):,} bytes")
 
-            # Skip near-empty chunks (silence / padding)
-            if len(audio_bytes) < 1_000:
+            # Skip header-only blobs
+            if len(audio_bytes) < 500:
+                print(f"  skipped (too small)")
                 continue
 
-            # Write to temp file then transcribe off the event loop
             with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as f:
                 f.write(audio_bytes)
                 tmp_path = f.name
@@ -89,7 +93,6 @@ async def transcribe_ws(websocket: WebSocket, lang: str = "ko"):
                 )
                 if text:
                     await websocket.send_text(text)
-                    print(f"[transcribed] {text!r}")
             except Exception as e:
                 print(f"[error] transcription failed: {e}")
             finally:

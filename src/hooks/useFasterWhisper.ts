@@ -6,9 +6,7 @@ import { SpeechRecognitionState } from "@/types";
 const STT_WS_URL =
   process.env.NEXT_PUBLIC_STT_WS_URL ?? "ws://localhost:8000/ws";
 
-// Record in 2-second complete clips (stop → restart).
-// Each clip is a self-contained WebM file that faster-whisper can decode.
-const CHUNK_MS = 2000;
+const CHUNK_MS = 5000; // 5-second clips — gives whisper enough context
 
 export function useFasterWhisper(lang: string) {
   const [state, setState] = useState<SpeechRecognitionState>({
@@ -21,6 +19,8 @@ export function useFasterWhisper(lang: string) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Keep a strong ref to prevent GC
+  const recorderRef = useRef<MediaRecorder | null>(null);
   const isListeningRef = useRef(false);
   const onFinalRef = useRef<((text: string) => void) | null>(null);
   const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,157 +35,170 @@ export function useFasterWhisper(lang: string) {
     setState((prev) => ({ ...prev, isSupported: supported }));
   }, []);
 
-  // ------------------------------------------------------------------
-  // Record one CHUNK_MS clip, send it, then immediately start the next
-  // ------------------------------------------------------------------
-  const recordChunk = useCallback(
-    (stream: MediaStream, ws: WebSocket, mimeType: string) => {
-      if (!isListeningRef.current || ws.readyState !== WebSocket.OPEN) return;
+  // Use a ref to allow onstop to call the latest version without stale closures
+  const startChunkRef = useRef<() => void>(() => {});
 
-      const chunks: Blob[] = [];
-      let recorder: MediaRecorder;
+  startChunkRef.current = () => {
+    const ws = wsRef.current;
+    const stream = streamRef.current;
+    if (!isListeningRef.current || !ws || !stream) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
 
-      try {
-        recorder = new MediaRecorder(stream, { mimeType });
-      } catch {
-        setState((prev) => ({ ...prev, error: "MediaRecorder 초기화 실패" }));
-        return;
-      }
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : MediaRecorder.isTypeSupported("audio/webm")
+      ? "audio/webm"
+      : "";
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
+    if (!mimeType) {
+      setState((prev) => ({ ...prev, error: "지원하지 않는 오디오 형식입니다" }));
+      return;
+    }
 
-      recorder.onstop = async () => {
-        // Send this clip to STT server
-        if (chunks.length > 0 && ws.readyState === WebSocket.OPEN) {
-          const blob = new Blob(chunks, { type: mimeType });
-          if (blob.size >= 1_000) {
-            try {
-              ws.send(await blob.arrayBuffer());
-            } catch {
-              // WebSocket closed — stop loop
-              return;
-            }
+    const chunks: Blob[] = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType });
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: `MediaRecorder 오류: ${e}` }));
+      return;
+    }
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onstop = async () => {
+      recorderRef.current = null;
+
+      if (chunks.length > 0 && ws.readyState === WebSocket.OPEN) {
+        const blob = new Blob(chunks, { type: mimeType });
+        // Only skip truly empty clips (< 500 bytes = headers only)
+        if (blob.size >= 500) {
+          setState((prev) => ({ ...prev, interimTranscript: "인식 중..." }));
+          try {
+            ws.send(await blob.arrayBuffer());
+          } catch {
+            // ws closed
           }
         }
-        // Start next clip immediately
-        if (isListeningRef.current) {
-          recordChunk(stream, ws, mimeType);
-        }
-      };
+      }
 
+      // Start next clip immediately after sending
+      if (isListeningRef.current) {
+        startChunkRef.current();
+      }
+    };
+
+    try {
       recorder.start();
-      chunkTimerRef.current = setTimeout(() => {
-        if (recorder.state === "recording") recorder.stop();
-      }, CHUNK_MS);
-    },
-    []
-  );
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: `녹음 시작 오류: ${e}` }));
+      return;
+    }
 
-  // ------------------------------------------------------------------
-  // startListening
-  // ------------------------------------------------------------------
-  const startListening = useCallback(
-    async (onFinal: (text: string) => void) => {
-      onFinalRef.current = onFinal;
-
-      // Clean up any previous session
-      isListeningRef.current = false;
-      if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
-      wsRef.current?.close();
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-
-      setState((prev) => ({ ...prev, isListening: true, error: null }));
-
-      // 1. Microphone
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        streamRef.current = stream;
-      } catch {
-        setState((prev) => ({
-          ...prev,
-          isListening: false,
-          error: "마이크 접근 권한이 필요합니다",
-        }));
-        return;
+    // Stop after CHUNK_MS to finalize and send the clip
+    chunkTimerRef.current = setTimeout(() => {
+      if (recorderRef.current?.state === "recording") {
+        recorderRef.current.stop();
       }
+    }, CHUNK_MS);
+  };
 
-      // 2. WebSocket to STT server
-      let ws: WebSocket;
-      try {
-        ws = await new Promise<WebSocket>((resolve, reject) => {
-          const socket = new WebSocket(
-            `${STT_WS_URL}?lang=${langRef.current}`
-          );
-          socket.binaryType = "arraybuffer";
-          const timer = setTimeout(
-            () => reject(new Error("STT 서버 연결 시간 초과 (localhost:8000)")),
-            5000
-          );
-          socket.onopen = () => { clearTimeout(timer); resolve(socket); };
-          socket.onerror = () => {
-            clearTimeout(timer);
-            reject(new Error("STT 서버에 연결할 수 없습니다 (python stt_server.py 실행 필요)"));
-          };
-        });
-        wsRef.current = ws;
-      } catch (err) {
-        stream.getTracks().forEach((t) => t.stop());
-        setState((prev) => ({
-          ...prev,
-          isListening: false,
-          error: (err as Error).message,
-        }));
-        return;
+  const startListening = useCallback(async (onFinal: (text: string) => void) => {
+    onFinalRef.current = onFinal;
+
+    // Tear down any existing session
+    isListeningRef.current = false;
+    if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+    }
+    wsRef.current?.close();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+
+    setState((prev) => ({ ...prev, isListening: true, error: null, interimTranscript: "" }));
+
+    // 1. Microphone
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      streamRef.current = stream;
+    } catch {
+      setState((prev) => ({
+        ...prev,
+        isListening: false,
+        error: "마이크 접근 권한이 필요합니다",
+      }));
+      return;
+    }
+
+    // 2. WebSocket
+    let ws: WebSocket;
+    try {
+      ws = await new Promise<WebSocket>((resolve, reject) => {
+        const socket = new WebSocket(`${STT_WS_URL}?lang=${langRef.current}`);
+        socket.binaryType = "arraybuffer";
+        const timer = setTimeout(
+          () => reject(new Error("STT 서버 연결 시간 초과 — python stt_server.py 실행 여부 확인")),
+          5000
+        );
+        socket.onopen = () => { clearTimeout(timer); resolve(socket); };
+        socket.onerror = () => {
+          clearTimeout(timer);
+          reject(new Error("STT 서버 연결 실패 (localhost:8000) — python stt_server.py 실행 필요"));
+        };
+      });
+      wsRef.current = ws;
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      setState((prev) => ({
+        ...prev,
+        isListening: false,
+        error: (err as Error).message,
+      }));
+      return;
+    }
+
+    // 3. Incoming transcription
+    ws.onmessage = (event) => {
+      const text = (event.data as string).trim();
+      if (!text) return;
+      setState((prev) => ({
+        ...prev,
+        interimTranscript: "",
+        finalTranscript: prev.finalTranscript
+          ? prev.finalTranscript + "\n" + text
+          : text,
+      }));
+      onFinalRef.current?.(text);
+    };
+
+    ws.onclose = () => {
+      if (isListeningRef.current) {
+        setState((prev) => ({ ...prev, error: "STT 서버 연결이 끊겼습니다" }));
       }
+    };
 
-      // 3. Handle incoming transcriptions
-      ws.onmessage = (event) => {
-        const text = (event.data as string).trim();
-        if (!text) return;
-        setState((prev) => ({
-          ...prev,
-          finalTranscript: prev.finalTranscript
-            ? prev.finalTranscript + "\n" + text
-            : text,
-        }));
-        onFinalRef.current?.(text);
-      };
+    // 4. Start first chunk
+    isListeningRef.current = true;
+    startChunkRef.current();
+  }, []);
 
-      ws.onclose = () => {
-        if (isListeningRef.current) {
-          setState((prev) => ({
-            ...prev,
-            error: "STT 서버 연결이 끊겼습니다",
-          }));
-        }
-      };
-
-      // 4. Start recording
-      isListeningRef.current = true;
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "audio/webm";
-      recordChunk(stream, ws, mimeType);
-    },
-    [recordChunk]
-  );
-
-  // ------------------------------------------------------------------
-  // stopListening
-  // ------------------------------------------------------------------
   const stopListening = useCallback(() => {
     isListeningRef.current = false;
     onFinalRef.current = null;
     if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+    }
     wsRef.current?.close();
     wsRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -197,11 +210,11 @@ export function useFasterWhisper(lang: string) {
     setState((prev) => ({ ...prev, finalTranscript: "", interimTranscript: "" }));
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       isListeningRef.current = false;
       if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
+      recorderRef.current?.stop();
       wsRef.current?.close();
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
