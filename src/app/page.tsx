@@ -4,9 +4,8 @@ import { useCallback, useRef, useState } from "react";
 import { Header } from "@/components/Header";
 import { TranslationDisplay } from "@/components/TranslationDisplay";
 import { MicButton } from "@/components/MicButton";
-import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { useFasterWhisper } from "@/hooks/useFasterWhisper";
 import { useTranslation } from "@/hooks/useTranslation";
-import { getLanguageByCode } from "@/lib/languages";
 
 // Split text on sentence-ending punctuation, keeping the delimiter attached.
 // e.g. "Hello world. How are you? Fine" → ["Hello world.", "How are you?", "Fine"]
@@ -31,8 +30,6 @@ export default function Home() {
   // Buffer for incomplete sentences (no ending punctuation yet)
   const sentenceBufferRef = useRef("");
 
-  const sourceBcp47 = getLanguageByCode(sourceLang)?.bcp47 ?? "ko-KR";
-
   const {
     isListening,
     isSupported,
@@ -42,7 +39,7 @@ export default function Home() {
     startListening,
     stopListening,
     clearTranscripts,
-  } = useSpeechRecognition(sourceBcp47);
+  } = useFasterWhisper(sourceLang);
 
   const {
     translatedText,
@@ -65,7 +62,7 @@ export default function Home() {
       stopListening();
     } else {
       sentenceBufferRef.current = "";
-      startListening((finalText) => {
+      startListening((finalText: string) => {
         // Combine with previous incomplete sentence
         const combined = sentenceBufferRef.current
           ? sentenceBufferRef.current + " " + finalText
