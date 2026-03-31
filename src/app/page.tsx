@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Header } from "@/components/Header";
 import { TranslationDisplay } from "@/components/TranslationDisplay";
 import { MicButton } from "@/components/MicButton";
@@ -8,9 +8,28 @@ import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { useTranslation } from "@/hooks/useTranslation";
 import { getLanguageByCode } from "@/lib/languages";
 
+// Split text on sentence-ending punctuation, keeping the delimiter attached.
+// e.g. "Hello world. How are you? Fine" → ["Hello world.", "How are you?", "Fine"]
+function splitBySentence(text: string): string[] {
+  const results: string[] = [];
+  const regex = /[^.!?。！？\n]*[.!?。！？\n]+/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    const s = match[0].trim();
+    if (s) results.push(s);
+    lastIndex = regex.lastIndex;
+  }
+  const remainder = text.slice(lastIndex).trim();
+  if (remainder) results.push(remainder);
+  return results;
+}
+
 export default function Home() {
   const [sourceLang, setSourceLang] = useState("ko");
   const [targetLang, setTargetLang] = useState("en");
+  // Buffer for incomplete sentences (no ending punctuation yet)
+  const sentenceBufferRef = useRef("");
 
   const sourceBcp47 = getLanguageByCode(sourceLang)?.bcp47 ?? "ko-KR";
 
@@ -37,10 +56,36 @@ export default function Home() {
 
   const handleMicToggle = useCallback(() => {
     if (isListening) {
+      // Flush any remaining buffered text before stopping
+      const remaining = sentenceBufferRef.current.trim();
+      if (remaining) {
+        translate(remaining, sourceLang, targetLang);
+        sentenceBufferRef.current = "";
+      }
       stopListening();
     } else {
+      sentenceBufferRef.current = "";
       startListening((finalText) => {
-        translate(finalText, sourceLang, targetLang);
+        // Combine with previous incomplete sentence
+        const combined = sentenceBufferRef.current
+          ? sentenceBufferRef.current + " " + finalText
+          : finalText;
+
+        const parts = splitBySentence(combined);
+        const lastPart = parts[parts.length - 1] ?? "";
+
+        // Check if the last part ends with punctuation (complete sentence)
+        const lastIsComplete = /[.!?。！？\n]$/.test(lastPart);
+
+        if (lastIsComplete) {
+          // All parts are complete — translate them all, clear buffer
+          parts.forEach((s) => translate(s, sourceLang, targetLang));
+          sentenceBufferRef.current = "";
+        } else {
+          // Translate all complete sentences, buffer the last incomplete one
+          parts.slice(0, -1).forEach((s) => translate(s, sourceLang, targetLang));
+          sentenceBufferRef.current = lastPart;
+        }
       });
     }
   }, [isListening, startListening, stopListening, translate, sourceLang, targetLang]);
@@ -48,6 +93,7 @@ export default function Home() {
   const handleSourceChange = useCallback(
     (code: string) => {
       setSourceLang(code);
+      sentenceBufferRef.current = "";
       if (isListening) stopListening();
       clearTranscripts();
       clearTranslation();
