@@ -43,7 +43,7 @@ export function TranslationDisplay({
             </p>
           ) : (
             <>
-              <span className="text-gray-800">{finalTranscript}</span>
+              <span className="text-gray-800 whitespace-pre-wrap">{finalTranscript}</span>
               {interimTranscript && (
                 <span className="text-gray-400">{interimTranscript}</span>
               )}
@@ -67,7 +67,7 @@ export function TranslationDisplay({
           {isEmpty ? (
             <p className="text-gray-300 select-none">번역이 여기 표시됩니다</p>
           ) : (
-            <span className="text-gray-800">{translatedText}</span>
+            <span className="text-gray-800 whitespace-pre-wrap">{translatedText}</span>
           )}
           <div ref={translatedEndRef} />
         </div>

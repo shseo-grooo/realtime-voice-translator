@@ -59,7 +59,9 @@ export function useSpeechRecognition(lang: string) {
         if (final) {
           setState((prev) => ({
             ...prev,
-            finalTranscript: prev.finalTranscript + final,
+            finalTranscript: prev.finalTranscript
+              ? prev.finalTranscript + "\n" + final
+              : final,
             interimTranscript: interim,
           }));
           onFinalRef.current?.(final.trim());

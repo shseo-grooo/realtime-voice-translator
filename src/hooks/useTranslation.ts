@@ -49,11 +49,11 @@ export function useTranslation() {
           const decoder = new TextDecoder();
           let chunk = "";
 
-          // Append a space separator between segments
+          // Append a newline separator between segments
           setState((prev) => ({
             ...prev,
             translatedText: prev.translatedText
-              ? prev.translatedText + " "
+              ? prev.translatedText + "\n"
               : "",
           }));
 
