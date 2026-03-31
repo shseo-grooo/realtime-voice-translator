@@ -27,6 +27,7 @@ export default function Home() {
 
   const {
     translatedText,
+    streamingText,
     isTranslating,
     error: translateError,
     translate,
@@ -84,6 +85,7 @@ export default function Home() {
         finalTranscript={finalTranscript}
         interimTranscript={interimTranscript}
         translatedText={translatedText}
+        streamingText={streamingText}
         isTranslating={isTranslating}
       />
 

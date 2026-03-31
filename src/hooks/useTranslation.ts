@@ -6,6 +6,7 @@ import { TranslationState } from "@/types";
 export function useTranslation() {
   const [state, setState] = useState<TranslationState>({
     translatedText: "",
+    streamingText: "",
     isTranslating: false,
     error: null,
   });
@@ -17,18 +18,21 @@ export function useTranslation() {
     (text: string, sourceLang: string, targetLang: string) => {
       if (!text.trim()) return;
 
-      // Cancel previous debounce
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
 
       debounceTimerRef.current = setTimeout(async () => {
-        // Abort previous in-flight request
         abortControllerRef.current?.abort();
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
-        setState((prev) => ({ ...prev, isTranslating: true, error: null }));
+        setState((prev) => ({
+          ...prev,
+          isTranslating: true,
+          streamingText: "",
+          error: null,
+        }));
 
         try {
           const response = await fetch("/api/translate", {
@@ -42,37 +46,36 @@ export function useTranslation() {
             throw new Error(`Translation failed: ${response.statusText}`);
           }
 
-          // Read streaming response
           const reader = response.body?.getReader();
           if (!reader) throw new Error("No response body");
 
           const decoder = new TextDecoder();
-          let chunk = "";
-
-          // Append a newline separator between segments
-          setState((prev) => ({
-            ...prev,
-            translatedText: prev.translatedText
-              ? prev.translatedText + "\n"
-              : "",
-          }));
+          let accumulated = "";
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            chunk = decoder.decode(value, { stream: true });
-            setState((prev) => ({
-              ...prev,
-              translatedText: prev.translatedText + chunk,
-            }));
+            const chunk = decoder.decode(value, { stream: true });
+            accumulated += chunk;
+            setState((prev) => ({ ...prev, streamingText: accumulated }));
           }
 
-          setState((prev) => ({ ...prev, isTranslating: false }));
+          // Commit trimmed result to translatedText, clear streamingText
+          const trimmed = accumulated.trim();
+          setState((prev) => ({
+            ...prev,
+            translatedText: prev.translatedText
+              ? prev.translatedText + "\n" + trimmed
+              : trimmed,
+            streamingText: "",
+            isTranslating: false,
+          }));
         } catch (err) {
           if ((err as Error).name === "AbortError") return;
           setState((prev) => ({
             ...prev,
             isTranslating: false,
+            streamingText: "",
             error: (err as Error).message,
           }));
         }
@@ -84,7 +87,7 @@ export function useTranslation() {
   const clearTranslation = useCallback(() => {
     abortControllerRef.current?.abort();
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    setState({ translatedText: "", isTranslating: false, error: null });
+    setState({ translatedText: "", streamingText: "", isTranslating: false, error: null });
   }, []);
 
   return { ...state, translate, clearTranslation };

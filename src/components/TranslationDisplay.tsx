@@ -7,6 +7,7 @@ interface TranslationDisplayProps {
   finalTranscript: string;
   interimTranscript: string;
   translatedText: string;
+  streamingText: string;
   isTranslating: boolean;
 }
 
@@ -14,6 +15,7 @@ export function TranslationDisplay({
   finalTranscript,
   interimTranscript,
   translatedText,
+  streamingText,
   isTranslating,
 }: TranslationDisplayProps) {
   const originalEndRef = useRef<HTMLDivElement>(null);
@@ -27,7 +29,7 @@ export function TranslationDisplay({
     translatedEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [translatedText]);
 
-  const isEmpty = !finalTranscript && !interimTranscript && !translatedText;
+  const isEmpty = !finalTranscript && !interimTranscript && !translatedText && !streamingText;
 
   return (
     <main className="flex-1 max-w-4xl mx-auto w-full px-4 py-6 pb-28 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -67,7 +69,14 @@ export function TranslationDisplay({
           {isEmpty ? (
             <p className="text-gray-300 select-none">번역이 여기 표시됩니다</p>
           ) : (
-            <span className="text-gray-800 whitespace-pre-wrap">{translatedText}</span>
+            <>
+              <span className="text-gray-800 whitespace-pre-wrap">{translatedText}</span>
+              {streamingText && (
+                <span className="text-gray-400 whitespace-pre-wrap">
+                  {translatedText ? "\n" : ""}{streamingText}
+                </span>
+              )}
+            </>
           )}
           <div ref={translatedEndRef} />
         </div>

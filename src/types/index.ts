@@ -15,6 +15,7 @@ export interface SpeechRecognitionState {
 
 export interface TranslationState {
   translatedText: string;
+  streamingText: string; // current segment being streamed (not yet committed)
   isTranslating: boolean;
   error: string | null;
 }
