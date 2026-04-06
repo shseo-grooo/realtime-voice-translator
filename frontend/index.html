@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>실시간 일-한 번역기</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+      background: #0f1117;
+      color: #e8e8e8;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #fff;
+      letter-spacing: -0.5px;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: #888;
+      margin-bottom: 32px;
+    }
+
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2a2d3a;
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 700px;
+      margin-bottom: 16px;
+    }
+
+    .card-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+    }
+
+    #stt-partial { color: #888; font-size: 0.9rem; min-height: 24px; font-style: italic; }
+
+    .result-list { display: flex; flex-direction: column; gap: 12px; }
+
+    .result-item {
+      border-left: 3px solid #444;
+      padding-left: 12px;
+    }
+    .result-item.active { border-left-color: #5b7fff; }
+
+    .result-ja {
+      font-size: 0.9rem;
+      color: #aaa;
+      margin-bottom: 4px;
+    }
+    .result-ko {
+      font-size: 1.05rem;
+      color: #e8e8e8;
+      font-weight: 500;
+    }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    button {
+      padding: 10px 28px;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #btn-start { background: #5b7fff; color: #fff; }
+    #btn-stop  { background: #ff5b5b; color: #fff; }
+
+    #status {
+      font-size: 0.82rem;
+      color: #888;
+      margin-bottom: 20px;
+      height: 18px;
+    }
+    #status.connected { color: #4caf50; }
+    #status.error     { color: #ff5b5b; }
+
+    /* 녹음 표시등 */
+    .rec-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #ff5b5b;
+      margin-right: 6px;
+      animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+  </style>
+</head>
+<body>
+  <h1>실시간 일-한 번역기</h1>
+  <p class="subtitle">whisper-streaming + Ollama (gemma4:e4b)</p>
+
+  <div id="status">서버에 연결 중...</div>
+
+  <div class="controls">
+    <button id="btn-start" disabled>마이크 시작</button>
+    <button id="btn-stop"  disabled>중지</button>
+  </div>
+
+  <!-- 실시간 미리보기 -->
+  <div class="card">
+    <div class="card-label" style="color:#888;">인식 중 (일본어)</div>
+    <div id="stt-partial">—</div>
+  </div>
+
+  <!-- 확정 번역 결과 -->
+  <div class="card">
+    <div class="card-label" style="color:#5b7fff;">번역 결과 (한국어)</div>
+    <div class="result-list" id="result-list"></div>
+  </div>
+
+  <script>
+  (() => {
+    const WS_URL = `ws://${location.host}/ws/translate`;
+    const SAMPLE_RATE = 16000;
+    const CHUNK_MS    = 250;   // 250ms마다 오디오 전송
+
+    const btnStart   = document.getElementById("btn-start");
+    const btnStop    = document.getElementById("btn-stop");
+    const statusEl   = document.getElementById("status");
+    const partialEl  = document.getElementById("stt-partial");
+    const resultList = document.getElementById("result-list");
+
+    let ws = null;
+    let audioCtx = null;
+    let workletNode = null;
+    let sourceNode  = null;
+    let stream      = null;
+
+    // 현재 진행 중인 item (STT 수신 후 번역 대기 중)
+    let pendingItem = null;
+
+    // ── WebSocket 연결 ──────────────────────────────────────────────────────
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        setStatus("연결됨", "connected");
+        btnStart.disabled = false;
+      };
+
+      ws.onclose = () => {
+        setStatus("연결 끊김", "error");
+        btnStart.disabled = true;
+        btnStop.disabled  = true;
+        stopRecording();
+        setTimeout(connectWS, 3000);
+      };
+
+      ws.onerror = () => {
+        setStatus("연결 오류 — 재시도 중...", "error");
+      };
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === "partial") {
+          partialEl.textContent = msg.text;
+          return;
+        }
+
+        if (msg.type === "stt") {
+          partialEl.textContent = "—";
+          pendingItem = addResultItem(msg.text, "");
+          return;
+        }
+
+        if (msg.type === "translation") {
+          if (pendingItem) {
+            pendingItem.querySelector(".result-ko").textContent = msg.text;
+            pendingItem.classList.add("active");
+            pendingItem = null;
+          } else {
+            // 이전 item 없으면 새로 추가
+            addResultItem("", msg.text);
+          }
+        }
+      };
+    }
+
+    function addResultItem(ja, ko) {
+      const item = document.createElement("div");
+      item.className = "result-item";
+      item.innerHTML = `<div class="result-ja">${escHtml(ja)}</div>
+                        <div class="result-ko">${escHtml(ko)}</div>`;
+      resultList.prepend(item);
+      // 최대 30개 유지
+      while (resultList.children.length > 30) {
+        resultList.removeChild(resultList.lastChild);
+      }
+      return item;
+    }
+
+    // ── 녹음 시작 ───────────────────────────────────────────────────────────
+    btnStart.addEventListener("click", async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        btnStart.disabled = true;
+        btnStop.disabled  = false;
+
+        // AudioContext를 16kHz로 강제
+        audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+        await audioCtx.audioWorklet.addModule(workletBlobURL());
+
+        sourceNode  = audioCtx.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(audioCtx, "pcm-sender", {
+          processorOptions: { chunkMs: CHUNK_MS, sampleRate: SAMPLE_RATE },
+        });
+
+        workletNode.port.onmessage = (ev) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(ev.data);  // Float32Array → ArrayBuffer
+          }
+        };
+
+        sourceNode.connect(workletNode);
+        workletNode.connect(audioCtx.destination);
+
+        setStatus(`<span class="rec-dot"></span>녹음 중 (${SAMPLE_RATE / 1000}kHz)`, "connected");
+      } catch (err) {
+        setStatus("마이크 접근 실패: " + err.message, "error");
+        console.error(err);
+      }
+    });
+
+    // ── 녹음 중지 ───────────────────────────────────────────────────────────
+    btnStop.addEventListener("click", stopRecording);
+
+    function stopRecording() {
+      if (workletNode) { workletNode.disconnect(); workletNode = null; }
+      if (sourceNode)  { sourceNode.disconnect();  sourceNode  = null; }
+      if (audioCtx)    { audioCtx.close();          audioCtx    = null; }
+      if (stream)      { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      btnStart.disabled = false;
+      btnStop.disabled  = true;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        setStatus("연결됨 (대기 중)", "connected");
+      }
+    }
+
+    // ── AudioWorklet Processor 코드 (Blob URL로 인라인 로딩) ─────────────────
+    function workletBlobURL() {
+      const code = `
+class PCMSenderProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const { chunkMs, sampleRate } = options.processorOptions;
+    this._chunkSize = Math.floor(sampleRate * chunkMs / 1000);
+    this._buf = new Float32Array(this._chunkSize);
+    this._pos = 0;
+  }
+
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || !input[0]) return true;
+    const ch = input[0];
+
+    let i = 0;
+    while (i < ch.length) {
+      const space = this._chunkSize - this._pos;
+      const take  = Math.min(space, ch.length - i);
+      this._buf.set(ch.subarray(i, i + take), this._pos);
+      this._pos += take;
+      i         += take;
+
+      if (this._pos >= this._chunkSize) {
+        // Float32Array를 그대로 ArrayBuffer로 전송
+        this.port.postMessage(this._buf.buffer, [this._buf.buffer]);
+        this._buf = new Float32Array(this._chunkSize);
+        this._pos = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("pcm-sender", PCMSenderProcessor);
+`;
+      const blob = new Blob([code], { type: "application/javascript" });
+      return URL.createObjectURL(blob);
+    }
+
+    function setStatus(html, cls = "") {
+      statusEl.innerHTML = html;
+      statusEl.className = cls;
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    connectWS();
+  })();
+  </script>
+</body>
+</html>
