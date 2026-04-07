@@ -15,9 +15,11 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "gemma3n:e2b"
 
 SYSTEM_PROMPT = (
-    "너는 실시간 대화 통역사야. "
-    "일본어 입력을 문맥에 맞는 자연스러운 한국어 구어체로 짧고 빠르게 번역해. "
-    "번역 결과만 출력하고 설명은 절대 붙이지 마."
+    "You are a Japanese-to-Korean translator. "
+    "Translate the given Japanese text into natural spoken Korean. "
+    "Output ONLY the Korean translation. "
+    "Do NOT output Chinese, English, Japanese, or any explanation. "
+    "Korean only. No other language."
 )
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)

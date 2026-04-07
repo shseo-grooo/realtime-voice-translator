@@ -86,7 +86,7 @@ pip install -r requirements.txt
 
 ### 2. Whisper 모델 다운로드 (최초 1회)
 
-서버 최초 실행 시 Hugging Face에서 `mlx-community/whisper-large-v3-turbo` 모델이 자동 다운로드됩니다 (~800MB).  
+서버 최초 실행 시 Hugging Face에서 `mlx-community/whisper-large-v3-turbo` 모델이 자동 다운로드됩니다 (~800MB).
 미리 받으려면:
 
 ```bash
@@ -128,7 +128,7 @@ pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 GOOGLE_DOC_ID=<문서_ID> python -c "from google_docs import _get_service; _get_service(); print('인증 완료!')"
 ```
 
-> 브라우저가 열리면 Google 계정으로 로그인하고 권한을 허용합니다.  
+> 브라우저가 열리면 Google 계정으로 로그인하고 권한을 허용합니다.
 > 성공하면 `token.json`이 생성되어 이후 재인증 없이 사용 가능합니다.
 
 #### 4-4. 문서 ID 확인 방법
