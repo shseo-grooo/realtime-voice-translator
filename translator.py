@@ -5,19 +5,22 @@ Translator: 로컬 Ollama API를 통해 일본어 → 한국어 번역
 from __future__ import annotations
 
 import logging
+import re
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "gemma4:e4b"
+MODEL = "gemma3n:e2b"
 
 SYSTEM_PROMPT = (
     "너는 실시간 대화 통역사야. "
     "일본어 입력을 문맥에 맞는 자연스러운 한국어 구어체로 짧고 빠르게 번역해. "
     "번역 결과만 출력하고 설명은 절대 붙이지 마."
 )
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 async def translate(japanese_text: str) -> str:
@@ -41,15 +44,22 @@ async def translate(japanese_text: str) -> str:
         "options": {
             "temperature": 0.3,
             "num_predict": 256,
+            "num_ctx": 2048,     # KV 캐시 최소화 (기본 262144 → 2048)
         },
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(OLLAMA_URL, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data.get("response", "").strip()
+            raw = data.get("response", "")
+            # </think> 이후 내용 추출 (thinking 모델 대응)
+            if "</think>" in raw:
+                cleaned = raw.split("</think>", 1)[-1].strip()
+            else:
+                cleaned = _THINK_RE.sub("", raw).strip()
+            return cleaned
     except httpx.ConnectError:
         logger.error("Ollama 서버에 연결할 수 없습니다. ollama serve 실행 여부를 확인하세요.")
         return ""

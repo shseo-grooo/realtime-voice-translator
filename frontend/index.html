@@ -69,6 +69,23 @@
       font-size: 1.05rem;
       color: #e8e8e8;
       font-weight: 500;
+      cursor: text;
+      border-radius: 4px;
+      padding: 2px 4px;
+      margin: -2px -4px;
+      transition: background 0.15s;
+    }
+    .result-ko:hover { background: rgba(255,255,255,0.05); }
+    .result-ko[contenteditable="true"] {
+      outline: none;
+      background: rgba(91,127,255,0.12);
+      border-bottom: 1px solid #5b7fff;
+    }
+    .edit-hint {
+      font-size: 0.7rem;
+      color: #555;
+      margin-top: 4px;
+      user-select: none;
     }
 
     .controls {
@@ -114,7 +131,7 @@
 </head>
 <body>
   <h1>실시간 일-한 번역기</h1>
-  <p class="subtitle">whisper-streaming + Ollama (gemma4:e4b)</p>
+  <p class="subtitle">whisper-streaming + Ollama (gemma3n:e2b)</p>
 
   <div id="status">서버에 연결 중...</div>
 
@@ -153,8 +170,8 @@
     let sourceNode  = null;
     let stream      = null;
 
-    // 현재 진행 중인 item (STT 수신 후 번역 대기 중)
-    let pendingItem = null;
+    // STT 수신 후 번역 대기 중인 item 큐 (FIFO)
+    const pendingQueue = [];
 
     // ── WebSocket 연결 ──────────────────────────────────────────────────────
     function connectWS() {
@@ -188,17 +205,20 @@
 
         if (msg.type === "stt") {
           partialEl.textContent = "—";
-          pendingItem = addResultItem(msg.text, "");
+          pendingQueue.push(addResultItem(msg.text, ""));
           return;
         }
 
         if (msg.type === "translation") {
-          if (pendingItem) {
-            pendingItem.querySelector(".result-ko").textContent = msg.text;
-            pendingItem.classList.add("active");
-            pendingItem = null;
+          const item = pendingQueue.shift();
+          if (item) {
+            const koEl = item.querySelector(".result-ko");
+            // 사용자가 편집 중이 아닐 때만 서버 결과로 덮어씀
+            if (koEl.contentEditable !== "true") {
+              koEl.textContent = msg.text;
+            }
+            item.classList.add("active");
           } else {
-            // 이전 item 없으면 새로 추가
             addResultItem("", msg.text);
           }
         }
@@ -208,8 +228,45 @@
     function addResultItem(ja, ko) {
       const item = document.createElement("div");
       item.className = "result-item";
-      item.innerHTML = `<div class="result-ja">${escHtml(ja)}</div>
-                        <div class="result-ko">${escHtml(ko)}</div>`;
+      item.innerHTML = `
+        <div class="result-ja">${escHtml(ja)}</div>
+        <div class="result-ko" title="클릭하여 수정">${escHtml(ko)}</div>
+        <div class="edit-hint">클릭하여 수정 · Enter 또는 클릭 밖으로 확정</div>`;
+
+      const koEl = item.querySelector(".result-ko");
+      const hint = item.querySelector(".edit-hint");
+
+      koEl.addEventListener("click", () => {
+        koEl.contentEditable = "true";
+        koEl.focus();
+        // 커서를 맨 끝으로
+        const range = document.createRange();
+        const sel = window.getSelection();
+        range.selectNodeContents(koEl);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        hint.style.color = "#5b7fff";
+      });
+
+      koEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          koEl.blur();
+        }
+        if (e.key === "Escape") {
+          koEl.blur();
+        }
+      });
+
+      koEl.addEventListener("blur", () => {
+        koEl.contentEditable = "false";
+        hint.style.color = "";
+        if (!koEl.textContent.trim()) {
+          item.remove();
+        }
+      });
+
       resultList.prepend(item);
       // 최대 30개 유지
       while (resultList.children.length > 30) {
@@ -221,7 +278,16 @@
     // ── 녹음 시작 ───────────────────────────────────────────────────────────
     btnStart.addEventListener("click", async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: SAMPLE_RATE,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
         btnStart.disabled = true;
         btnStop.disabled  = false;
 

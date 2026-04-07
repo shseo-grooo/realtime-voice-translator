@@ -7,7 +7,7 @@
 * **STT Engine:** `whisper-streaming` (Faster-Whisper 기반 라이브러리)
 * **Model:** `large-v3-turbo` (속도와 정확도의 최적 접점)
 * **Language:** Input `Japanese (ja)`, Translation Target `Korean (ko)`
-* **LLM:** `Ollama` (gemma4:e4b)
+* **LLM:** `Ollama` (gemma3n:e2b)
 * **Communication:** WebSockets (Binary Audio Stream)
 
 ## 3. 핵심 아키텍처 및 로직
